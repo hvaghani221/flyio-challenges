@@ -3,7 +3,6 @@ package broadcast
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
@@ -11,9 +10,8 @@ import (
 
 type nodeBroadcast struct {
 	topology map[string][]string
-	seen     []int
-	seenMap  map[int]struct{}
-	lock     sync.RWMutex
+	messages *messages
+	known    map[string]*messages
 	ctx      context.Context
 	cancel   func()
 }
@@ -21,10 +19,10 @@ type nodeBroadcast struct {
 func New() *nodeBroadcast {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &nodeBroadcast{
-		seen:    make([]int, 0, 1024),
-		seenMap: make(map[int]struct{}, 1024),
-		ctx:     ctx,
-		cancel:  cancel,
+		messages: newMessages(),
+		known:    make(map[string]*messages),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 }
 
@@ -40,12 +38,7 @@ func (sb *nodeBroadcast) BroadcastHandler(n *maelstrom.Node) maelstrom.HandlerFu
 			return err
 		}
 
-		sb.lock.Lock()
-		defer sb.lock.Unlock()
-		if _, ok := sb.seenMap[body.Message]; !ok {
-			sb.seenMap[body.Message] = struct{}{}
-			sb.seen = append(sb.seen, body.Message)
-		}
+		sb.messages.Add(body.Message)
 
 		resp := map[string]string{
 			"type": "broadcast_ok",
@@ -56,11 +49,9 @@ func (sb *nodeBroadcast) BroadcastHandler(n *maelstrom.Node) maelstrom.HandlerFu
 
 func (sb *nodeBroadcast) ReadHandler(n *maelstrom.Node) maelstrom.HandlerFunc {
 	return func(msg maelstrom.Message) error {
-		sb.lock.RLock()
-		defer sb.lock.RUnlock()
 		resp := map[string]any{
 			"type":     "read_ok",
-			"messages": sb.seen,
+			"messages": sb.messages.ReadAll(),
 		}
 
 		return n.Reply(msg, resp)
@@ -74,12 +65,16 @@ type topologyResponse struct {
 
 func (sb *nodeBroadcast) TopologyHandler(n *maelstrom.Node) maelstrom.HandlerFunc {
 	return func(msg maelstrom.Message) error {
-		var body topologyResponse
-		if err := json.Unmarshal(msg.Body, &body); err != nil {
-			return err
+		if sb.topology == nil {
+			var body topologyResponse
+			if err := json.Unmarshal(msg.Body, &body); err != nil {
+				return err
+			}
+			sb.topology = body.Topology
+			for n := range sb.topology {
+				sb.known[n] = newMessagesSeenOnly()
+			}
 		}
-		sb.topology = body.Topology
-
 		resp := map[string]string{
 			"type": "topology_ok",
 		}
@@ -101,14 +96,8 @@ func (sb *nodeBroadcast) GossipHandler(n *maelstrom.Node) maelstrom.HandlerFunc 
 			return err
 		}
 
-		sb.lock.Lock()
-		defer sb.lock.Unlock()
-		for _, message := range body.Messages {
-			if _, ok := sb.seenMap[message]; !ok {
-				sb.seenMap[message] = struct{}{}
-				sb.seen = append(sb.seen, message)
-			}
-		}
+		sb.messages.AddAll(body.Messages)
+		sb.known[msg.Src].RememberAll(body.Messages)
 		return nil
 	}
 }
@@ -122,12 +111,15 @@ func (sb *nodeBroadcast) gossipLoop(ctx context.Context, n *maelstrom.Node) {
 			cid := n.ID()
 
 			nodes = sb.topology[cid]
-			body := gossipBody{
-				Type:     "gossip",
-				Messages: sb.seen,
-			}
 			for _, id := range nodes {
-				go func(id string) { _ = n.Send(id, body) }(id)
+				messagesCopy := sb.messages.ReadAll()
+				go func(id string) {
+					body := gossipBody{
+						Type:     "gossip",
+						Messages: sb.known[id].ReadFiltered(messagesCopy),
+					}
+					_ = n.Send(id, body)
+				}(id)
 			}
 		case <-ctx.Done():
 			timer.Stop()

@@ -17,5 +17,10 @@ test3b: build
 test3c: build
 	./bin/maelstrom/maelstrom test -w broadcast --bin flyio-challenges --node-count 5 --time-limit 20 --rate 10 --nemesis partition
 
+test3d: build
+	./bin/maelstrom/maelstrom test -w broadcast --bin  flyio-challenges --node-count 25 --time-limit 20 --rate 100 --latency 100
+
+test3e: build
+	./bin/maelstrom/maelstrom test -w broadcast --bin  flyio-challenges --node-count 25 --time-limit 20 --rate 100 --latency 100
 debug:
 	./bin/maelstrom/maelstrom serve
