@@ -22,5 +22,9 @@ test3d: build
 
 test3e: build
 	./bin/maelstrom/maelstrom test -w broadcast --bin  flyio-challenges --node-count 25 --time-limit 20 --rate 100 --latency 100
+
+test4: build
+	./bin/maelstrom/maelstrom test -w g-counter --bin flyio-challenges --node-count 3 --rate 100 --time-limit 20 --nemesis partition
+
 debug:
 	./bin/maelstrom/maelstrom serve
