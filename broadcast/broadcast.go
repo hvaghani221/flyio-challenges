@@ -74,6 +74,8 @@ func (sb *nodeBroadcast) TopologyHandler(n *maelstrom.Node) maelstrom.HandlerFun
 			for n := range sb.topology {
 				sb.known[n] = newMessagesSeenOnly()
 			}
+			// start gossiping
+			go sb.gossipLoop(sb.ctx, n)
 		}
 		resp := map[string]string{
 			"type": "topology_ok",
@@ -89,7 +91,6 @@ type gossipBody struct {
 }
 
 func (sb *nodeBroadcast) GossipHandler(n *maelstrom.Node) maelstrom.HandlerFunc {
-	go sb.gossipLoop(sb.ctx, n)
 	return func(msg maelstrom.Message) error {
 		var body gossipBody
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
@@ -98,7 +99,7 @@ func (sb *nodeBroadcast) GossipHandler(n *maelstrom.Node) maelstrom.HandlerFunc 
 
 		sb.messages.AddAll(body.Messages)
 		sb.known[msg.Src].RememberAll(body.Messages)
-		return nil
+		return n.Reply(msg, gossipBody{Type: "gossip_ok"})
 	}
 }
 
@@ -114,11 +115,22 @@ func (sb *nodeBroadcast) gossipLoop(ctx context.Context, n *maelstrom.Node) {
 			for _, id := range nodes {
 				messagesCopy := sb.messages.ReadAll()
 				go func(id string) {
+					messages := sb.known[id].ReadFiltered(messagesCopy)
 					body := gossipBody{
 						Type:     "gossip",
-						Messages: sb.known[id].ReadFiltered(messagesCopy),
+						Messages: messages,
 					}
-					_ = n.Send(id, body)
+					respRaw, err := n.SyncRPC(sb.ctx, id, body)
+					if err != nil {
+						return
+					}
+					var resp gossipBody
+					if err := json.Unmarshal(respRaw.Body, &resp); err != nil {
+						return
+					}
+					if resp.Type == "gossip_ok" {
+						sb.known[id].RememberAll(messages)
+					}
 				}(id)
 			}
 		case <-ctx.Done():
